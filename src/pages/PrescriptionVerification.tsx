@@ -10,6 +10,62 @@ import { supabase } from "@/integrations/supabase/client";
 import Tesseract from "tesseract.js";
 import { FileText, CheckCircle, XCircle } from "lucide-react";
 
+// Fuzzy matching function for prescription validation
+const validatePrescription = (ocrText: string, medicineName: string): boolean => {
+  // Strategy 1: Direct substring match
+  if (ocrText.includes(medicineName)) {
+    return true;
+  }
+
+  // Strategy 2: Match each word of the medicine name
+  const medicineWords = medicineName.split(" ").filter(word => word.length > 2);
+  const matchedWords = medicineWords.filter(word => ocrText.includes(word));
+  if (matchedWords.length >= Math.ceil(medicineWords.length * 0.6)) {
+    return true;
+  }
+
+  // Strategy 3: Check for partial matches (first 4+ characters of each word)
+  const partialMatches = medicineWords.filter(word => {
+    if (word.length >= 4) {
+      const prefix = word.substring(0, 4);
+      return ocrText.includes(prefix);
+    }
+    return ocrText.includes(word);
+  });
+  if (partialMatches.length >= Math.ceil(medicineWords.length * 0.5)) {
+    return true;
+  }
+
+  // Strategy 4: Fuzzy match - check if words are similar (allow 1-2 char difference)
+  const ocrWords = ocrText.split(" ");
+  for (const medWord of medicineWords) {
+    for (const ocrWord of ocrWords) {
+      if (similarityScore(medWord, ocrWord) >= 0.75) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+};
+
+// Calculate similarity between two strings (0-1)
+const similarityScore = (str1: string, str2: string): number => {
+  if (str1 === str2) return 1;
+  if (str1.length < 3 || str2.length < 3) return str1 === str2 ? 1 : 0;
+  
+  const longer = str1.length > str2.length ? str1 : str2;
+  const shorter = str1.length > str2.length ? str2 : str1;
+  
+  if (longer.includes(shorter)) return shorter.length / longer.length;
+  
+  let matches = 0;
+  for (let i = 0; i < shorter.length; i++) {
+    if (longer.includes(shorter[i])) matches++;
+  }
+  return matches / longer.length;
+};
+
 const PrescriptionVerification = () => {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
@@ -112,13 +168,16 @@ const PrescriptionVerification = () => {
 
       // Process OCR
       const extractedText = await processOCR(file);
-      const cleanedText = extractedText.toLowerCase().replace(/\s+/g, " ").trim();
-      const normalizedMedicineName = medicineName.toLowerCase().trim();
+      const cleanedText = extractedText.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+      const normalizedMedicineName = medicineName.toLowerCase().replace(/[^a-z0-9\s]/g, " ").trim();
+
+      console.log("OCR Text:", cleanedText);
+      console.log("Medicine to find:", normalizedMedicineName);
 
       setOcrText(extractedText);
 
-      // Verify if medicine is mentioned in prescription
-      const isVerified = cleanedText.includes(normalizedMedicineName);
+      // Improved verification with multiple matching strategies
+      const isVerified = validatePrescription(cleanedText, normalizedMedicineName);
       
       // Upload file to storage
       const fileUrl = await uploadToStorage(file);
