@@ -9,6 +9,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { supabase } from "@/integrations/supabase/client";
 import Tesseract from "tesseract.js";
 
+// Normalizes text so "250mg" matches "250 mg" and ignores case/newlines/symbols
+const normalizeCompact = (text: string) =>
+  text.toLowerCase().replace(/[^a-z0-9]/g, "");
+
 const Prescriptions = () => {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
@@ -100,14 +104,14 @@ const Prescriptions = () => {
       });
 
       const extractedText = await processOCR(file);
-      const cleanedText = extractedText.toLowerCase().replace(/\s+/g, " ").trim();
-      const normalizedMedicineName = medicineName.toLowerCase().trim();
+      const compactOcr = normalizeCompact(extractedText);
+      const compactMedicine = normalizeCompact(medicineName);
 
       setOcrText(extractedText);
 
       const fileUrl = await uploadToStorage(file);
       
-      if (!cleanedText.includes(normalizedMedicineName)) {
+      if (!compactOcr.includes(compactMedicine)) {
         await savePrescription(fileUrl, medicineName, "rejected");
         toast({
           title: "Invalid Prescription",
