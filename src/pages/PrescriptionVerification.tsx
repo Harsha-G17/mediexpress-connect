@@ -10,60 +10,134 @@ import { supabase } from "@/integrations/supabase/client";
 import Tesseract from "tesseract.js";
 import { FileText, CheckCircle, XCircle } from "lucide-react";
 
-// Fuzzy matching function for prescription validation
-const validatePrescription = (ocrText: string, medicineName: string): boolean => {
-  // Strategy 1: Direct substring match
-  if (ocrText.includes(medicineName)) {
-    return true;
-  }
+// Levenshtein distance for accurate fuzzy matching
+const levenshteinDistance = (str1: string, str2: string): number => {
+  const m = str1.length;
+  const n = str2.length;
+  const dp: number[][] = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
 
-  // Strategy 2: Match each word of the medicine name
-  const medicineWords = medicineName.split(" ").filter(word => word.length > 2);
-  const matchedWords = medicineWords.filter(word => ocrText.includes(word));
-  if (matchedWords.length >= Math.ceil(medicineWords.length * 0.6)) {
-    return true;
-  }
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
 
-  // Strategy 3: Check for partial matches (first 4+ characters of each word)
-  const partialMatches = medicineWords.filter(word => {
-    if (word.length >= 4) {
-      const prefix = word.substring(0, 4);
-      return ocrText.includes(prefix);
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (str1[i - 1] === str2[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
     }
-    return ocrText.includes(word);
-  });
-  if (partialMatches.length >= Math.ceil(medicineWords.length * 0.5)) {
-    return true;
+  }
+  return dp[m][n];
+};
+
+// Normalize text for comparison (handles OCR common errors)
+const normalizeForOCR = (text: string): string => {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ") // Remove special chars
+    .replace(/0/g, "o")           // OCR often confuses 0 and o
+    .replace(/1/g, "l")           // OCR often confuses 1 and l
+    .replace(/5/g, "s")           // OCR often confuses 5 and s
+    .replace(/8/g, "b")           // OCR often confuses 8 and b
+    .replace(/\s+/g, " ")         // Normalize whitespace
+    .trim();
+};
+
+// Calculate similarity score between two strings (0-1)
+const similarityScore = (str1: string, str2: string): number => {
+  if (str1 === str2) return 1;
+  if (str1.length === 0 || str2.length === 0) return 0;
+  
+  const distance = levenshteinDistance(str1, str2);
+  const maxLength = Math.max(str1.length, str2.length);
+  return 1 - (distance / maxLength);
+};
+
+// Fuzzy matching function for prescription validation
+const validatePrescription = (ocrText: string, medicineName: string): { isValid: boolean; confidence: number } => {
+  const normalizedOCR = normalizeForOCR(ocrText);
+  const normalizedMedicine = normalizeForOCR(medicineName);
+  
+  console.log("Normalized OCR:", normalizedOCR);
+  console.log("Normalized Medicine:", normalizedMedicine);
+
+  // Strategy 1: Direct substring match (100% confidence)
+  if (normalizedOCR.includes(normalizedMedicine)) {
+    console.log("Strategy 1: Direct match found");
+    return { isValid: true, confidence: 100 };
   }
 
-  // Strategy 4: Fuzzy match - check if words are similar (allow 1-2 char difference)
-  const ocrWords = ocrText.split(" ");
+  // Strategy 2: Word-by-word matching
+  const medicineWords = normalizedMedicine.split(" ").filter(word => word.length >= 3);
+  const ocrWords = normalizedOCR.split(" ").filter(word => word.length >= 2);
+  
+  if (medicineWords.length === 0) {
+    // Single short word - check if it exists
+    if (normalizedOCR.includes(normalizedMedicine)) {
+      return { isValid: true, confidence: 100 };
+    }
+  }
+
+  // Check each medicine word against OCR words
+  let matchedWords = 0;
+  let totalScore = 0;
+  
   for (const medWord of medicineWords) {
+    let bestMatch = 0;
+    
+    // Check direct inclusion
+    if (normalizedOCR.includes(medWord)) {
+      matchedWords++;
+      totalScore += 1;
+      console.log(`Word "${medWord}" found directly`);
+      continue;
+    }
+    
+    // Check similarity with each OCR word
     for (const ocrWord of ocrWords) {
-      if (similarityScore(medWord, ocrWord) >= 0.75) {
-        return true;
+      const score = similarityScore(medWord, ocrWord);
+      if (score > bestMatch) {
+        bestMatch = score;
+      }
+    }
+    
+    if (bestMatch >= 0.7) {
+      matchedWords++;
+      totalScore += bestMatch;
+      console.log(`Word "${medWord}" matched with score ${bestMatch.toFixed(2)}`);
+    }
+  }
+
+  const matchRatio = medicineWords.length > 0 ? matchedWords / medicineWords.length : 0;
+  const avgScore = medicineWords.length > 0 ? totalScore / medicineWords.length : 0;
+  
+  console.log(`Match ratio: ${matchRatio.toFixed(2)}, Avg score: ${avgScore.toFixed(2)}`);
+
+  // Strategy 3: At least 60% of words match with good similarity
+  if (matchRatio >= 0.6 && avgScore >= 0.5) {
+    return { isValid: true, confidence: Math.round(avgScore * 100) };
+  }
+
+  // Strategy 4: Check if medicine name appears as a continuous substring with minor variations
+  for (const ocrWord of ocrWords) {
+    if (ocrWord.length >= normalizedMedicine.length - 2) {
+      const score = similarityScore(ocrWord, normalizedMedicine);
+      if (score >= 0.75) {
+        console.log(`Fuzzy match found: "${ocrWord}" ~ "${normalizedMedicine}" (${score.toFixed(2)})`);
+        return { isValid: true, confidence: Math.round(score * 100) };
       }
     }
   }
 
-  return false;
-};
-
-// Calculate similarity between two strings (0-1)
-const similarityScore = (str1: string, str2: string): number => {
-  if (str1 === str2) return 1;
-  if (str1.length < 3 || str2.length < 3) return str1 === str2 ? 1 : 0;
-  
-  const longer = str1.length > str2.length ? str1 : str2;
-  const shorter = str1.length > str2.length ? str2 : str1;
-  
-  if (longer.includes(shorter)) return shorter.length / longer.length;
-  
-  let matches = 0;
-  for (let i = 0; i < shorter.length; i++) {
-    if (longer.includes(shorter[i])) matches++;
+  // Strategy 5: Check prefix matching (first 4+ characters)
+  const medicinePrefix = normalizedMedicine.substring(0, Math.min(5, normalizedMedicine.length));
+  if (normalizedOCR.includes(medicinePrefix)) {
+    console.log(`Prefix match found: "${medicinePrefix}"`);
+    return { isValid: true, confidence: 70 };
   }
-  return matches / longer.length;
+
+  return { isValid: false, confidence: 0 };
 };
 
 const PrescriptionVerification = () => {
@@ -168,16 +242,15 @@ const PrescriptionVerification = () => {
 
       // Process OCR
       const extractedText = await processOCR(file);
-      const cleanedText = extractedText.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
-      const normalizedMedicineName = medicineName.toLowerCase().replace(/[^a-z0-9\s]/g, " ").trim();
-
-      console.log("OCR Text:", cleanedText);
-      console.log("Medicine to find:", normalizedMedicineName);
+      
+      console.log("Raw OCR Text:", extractedText);
+      console.log("Medicine to find:", medicineName);
 
       setOcrText(extractedText);
 
       // Improved verification with multiple matching strategies
-      const isVerified = validatePrescription(cleanedText, normalizedMedicineName);
+      const { isValid: isVerified, confidence } = validatePrescription(extractedText, medicineName);
+      console.log(`Verification result: ${isVerified}, Confidence: ${confidence}%`);
       
       // Upload file to storage
       const fileUrl = await uploadToStorage(file);
